@@ -55,6 +55,8 @@
   const word=$("word"),dir=$("dir"),go=$("go"),result=$("result"),source=$("source"),status=$("status"),historyEl=$("history"),jaMic=$("jaMic"),enMic=$("enMic");
   const KEY="word-helper-history-v1";
   let history=[];
+  let activeRecognition=null;
+  let activeButton=null;
   try{history=JSON.parse(localStorage.getItem(KEY)||"[]")}catch{history=[]}
 
   function pair(){return dir.value==="ja-en"?{source:"ja",target:"en",speech:"ja-JP",label:"日本語 → English"}:{source:"en",target:"ja",speech:"en-US",label:"English → 日本語"}}
@@ -69,8 +71,118 @@
   go.onclick=translate;word.addEventListener("keydown",e=>{if(e.key==="Enter")translate()});
 
   const Recognition=window.SpeechRecognition||window.webkitSpeechRecognition;
-  function listen(direction,button){dir.value=direction;if(!Recognition){status.className="status error";status.textContent="このブラウザは音声認識に対応していません";return}const rec=new Recognition();rec.lang=pair().speech;rec.interimResults=false;rec.maxAlternatives=1;button.classList.add("listen");status.className="status";status.textContent="聞いています…";rec.onresult=e=>{word.value=e.results[0][0].transcript.trim();translate()};rec.onerror=e=>{status.className="status error";status.textContent="音声認識: "+e.error};rec.onend=()=>button.classList.remove("listen");rec.start()}
-  jaMic.onclick=()=>listen("ja-en",jaMic);enMic.onclick=()=>listen("en-ja",enMic);
+
+  async function ensureMicPermission(){
+    if(!navigator.mediaDevices?.getUserMedia)return true;
+    try{
+      if(navigator.permissions?.query){
+        try{
+          const permission=await navigator.permissions.query({name:"microphone"});
+          if(permission.state==="denied")return false;
+          if(permission.state==="granted")return true;
+        }catch{}
+      }
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+      stream.getTracks().forEach(track=>track.stop());
+      await new Promise(resolve=>setTimeout(resolve,150));
+      return true;
+    }catch(e){
+      console.error("microphone permission",e);
+      return false;
+    }
+  }
+
+  function finishRecognition(){
+    if(activeButton)activeButton.classList.remove("listen");
+    activeRecognition=null;
+    activeButton=null;
+  }
+
+  async function listen(direction,button,retry=0,skipPermission=false){
+    dir.value=direction;
+    if(!Recognition){
+      status.className="status error";
+      status.textContent="Chromeの音声認識に対応していません。入力欄でGboardの🎤を使ってください";
+      word.focus();
+      return;
+    }
+    if(activeRecognition){
+      status.className="status";
+      status.textContent="すでに聞き取り中です";
+      return;
+    }
+    if(!skipPermission){
+      status.className="status";
+      status.textContent="マイクを準備しています…";
+      const allowed=await ensureMicPermission();
+      if(!allowed){
+        status.className="status error";
+        status.textContent="マイク権限がありません。Chromeのサイト設定でマイクを許可してください";
+        return;
+      }
+    }
+
+    const rec=new Recognition();
+    activeRecognition=rec;
+    activeButton=button;
+    rec.lang=pair().speech;
+    rec.continuous=false;
+    rec.interimResults=false;
+    rec.maxAlternatives=1;
+    let gotResult=false;
+    let errorCode="";
+
+    button.classList.add("listen");
+    status.className="status";
+    status.textContent=retry?"もう一度聞いています…":"聞いています…";
+
+    rec.onresult=e=>{
+      gotResult=true;
+      word.value=e.results[0][0].transcript.trim();
+      status.textContent="認識しました";
+      translate();
+    };
+
+    rec.onerror=e=>{
+      errorCode=e.error||"unknown";
+      console.error("speech recognition",errorCode,e);
+    };
+
+    rec.onend=()=>{
+      finishRecognition();
+      if(gotResult)return;
+      if(errorCode==="aborted" && retry<1){
+        status.className="status";
+        status.textContent="Chromeが中断しました。1回だけ再試行します…";
+        setTimeout(()=>listen(direction,button,retry+1,true),450);
+        return;
+      }
+      status.className="status error";
+      if(errorCode==="aborted"){
+        status.textContent="Chromeが音声認識を中断しました。下の入力欄をタップしてGboardの🎤を使えます";
+      }else if(errorCode==="not-allowed"||errorCode==="service-not-allowed"){
+        status.textContent="マイク/音声認識が許可されていません";
+      }else if(errorCode==="no-speech"){
+        status.textContent="音声を拾えませんでした。もう一度押してください";
+      }else if(errorCode==="network"){
+        status.textContent="Chromeの音声認識サービスに接続できませんでした";
+      }else{
+        status.textContent="音声認識に失敗しました: "+(errorCode||"終了");
+      }
+      word.focus();
+    };
+
+    try{rec.start()}catch(e){
+      console.error("recognition start",e);
+      finishRecognition();
+      status.className="status error";
+      status.textContent="音声認識を開始できませんでした。入力欄でGboardの🎤を使ってください";
+      word.focus();
+    }
+  }
+
+  jaMic.onclick=()=>listen("ja-en",jaMic);
+  enMic.onclick=()=>listen("en-ja",enMic);
 
   $("clear").onclick=()=>{if(confirm("単語帳の履歴をすべて削除しますか？")){history=[];localStorage.removeItem(KEY);render()}};
   render();
